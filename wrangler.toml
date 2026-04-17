@@ -1,0 +1,29 @@
+name = "remarkable-mcp"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+
+# Custom domain — Cloudflare must have mcgaughey.dev as an active zone.
+# Uncomment after first deploy, or set the route in the Cloudflare dashboard.
+# [[routes]]
+# pattern = "remarkable.mcgaughey.dev"
+# custom_domain = true
+
+# KV namespaces. Create them once with:
+#   wrangler kv namespace create TOKEN_CACHE
+#   wrangler kv namespace create RATE_LIMIT
+# then paste the returned ids below.
+[[kv_namespaces]]
+binding = "TOKEN_CACHE"
+id = "REPLACE_WITH_TOKEN_CACHE_ID"
+
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "REPLACE_WITH_RATE_LIMIT_ID"
+
+# Secrets (set with `wrangler secret put NAME`):
+#   REMARKABLE_DEVICE_TOKEN — from ~/.config/rmapi/rmapi.conf on the paired Mac
+#   MCP_BEARER_TOKEN        — the token Claude.ai sends in Authorization header
+
+[vars]
+DAILY_UPLOAD_CAP_MB = "200"
+DEFAULT_FOLDER = "/Inbox"
