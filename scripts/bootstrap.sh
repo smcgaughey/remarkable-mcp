@@ -6,13 +6,30 @@
 # the Claude.ai Custom Connector with the new value if that happens.
 set -euo pipefail
 
-RMAPI_CONF="$HOME/.config/rmapi/rmapi.conf"
+# rmapi stores its config in the platform's user-config dir:
+#   macOS: ~/Library/Application Support/rmapi/rmapi.conf
+#   Linux: ~/.config/rmapi/rmapi.conf
+CANDIDATES=(
+  "$HOME/Library/Application Support/rmapi/rmapi.conf"
+  "$HOME/.config/rmapi/rmapi.conf"
+)
 
-if [ ! -f "$RMAPI_CONF" ]; then
-  echo "ERROR: $RMAPI_CONF not found." >&2
+RMAPI_CONF=""
+for c in "${CANDIDATES[@]}"; do
+  if [ -f "$c" ]; then
+    RMAPI_CONF="$c"
+    break
+  fi
+done
+
+if [ -z "$RMAPI_CONF" ]; then
+  echo "ERROR: rmapi.conf not found. Looked in:" >&2
+  for c in "${CANDIDATES[@]}"; do echo "  $c" >&2; done
   echo "Pair rmapi first: run 'rmapi' and enter a code from https://my.remarkable.com/device/desktop/connect" >&2
   exit 1
 fi
+
+echo "==> Using $RMAPI_CONF"
 
 DEVICE_TOKEN=$(grep '^devicetoken:' "$RMAPI_CONF" | awk '{print $2}')
 if [ -z "${DEVICE_TOKEN:-}" ]; then

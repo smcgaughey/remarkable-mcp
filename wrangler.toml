@@ -14,11 +14,11 @@ compatibility_date = "2026-04-01"
 # then paste the returned ids below.
 [[kv_namespaces]]
 binding = "TOKEN_CACHE"
-id = "REPLACE_WITH_TOKEN_CACHE_ID"
+id = "72351aa3e44248a58fc9492cc9d1a6aa"
 
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
-id = "REPLACE_WITH_RATE_LIMIT_ID"
+id = "e53160accec141ceb868e7c0b0ffffcc"
 
 # Secrets (set with `wrangler secret put NAME`):
 #   REMARKABLE_DEVICE_TOKEN — from ~/.config/rmapi/rmapi.conf on the paired Mac
