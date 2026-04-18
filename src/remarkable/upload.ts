@@ -34,6 +34,50 @@ interface IndexLine {
   size: number;
 }
 
+// Wrap fetch with a per-request timeout and retry-on-5xx/abort. All reMarkable
+// cloud operations in this module are idempotent — blob PUTs are keyed by
+// content hash (so a retry writes the same bytes at the same key), GETs are
+// pure, and the root commit's generation check makes a "duplicate" commit a
+// no-op (returns 412, which the outer concurrency loop handles). That makes
+// retries safe across the board.
+//
+// Default 25s per attempt × 3 attempts ≈ 75s worst case — still under the
+// Cloudflare 524 edge timeout (100s) that bit us on the first real upload.
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit = {},
+  opts: { timeoutMs?: number; maxAttempts?: number } = {},
+): Promise<Response> {
+  const { timeoutMs = 25_000, maxAttempts = 3 } = opts;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(url, { ...init, signal: controller.signal });
+      clearTimeout(timer);
+      // Retry server errors but return 4xx immediately (they're not transient).
+      if (resp.status >= 500 && resp.status < 600 && attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 400 * attempt));
+        continue;
+      }
+      return resp;
+    } catch (err) {
+      clearTimeout(timer);
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 400 * attempt));
+        continue;
+      }
+    }
+  }
+  throw new Error(
+    `fetch ${url} failed after ${maxAttempts} attempts: ${
+      lastErr instanceof Error ? lastErr.message : String(lastErr)
+    }`,
+  );
+}
+
 const CRC32C_TABLE = ((): Uint32Array => {
   const t = new Uint32Array(256);
   for (let i = 0; i < 256; i++) {
@@ -103,7 +147,7 @@ async function putBlob(
   body: Uint8Array,
   contentType = 'application/octet-stream',
 ): Promise<void> {
-  const resp = await fetch(BLOB_URL + hashHex, {
+  const resp = await fetchWithRetry(BLOB_URL + hashHex, {
     method: 'PUT',
     headers: {
       Authorization: `Bearer ${userToken}`,
@@ -119,7 +163,7 @@ async function putBlob(
 }
 
 async function fetchRootMeta(userToken: string): Promise<RootMeta> {
-  const resp = await fetch(ROOT_GET, {
+  const resp = await fetchWithRetry(ROOT_GET, {
     headers: { Authorization: `Bearer ${userToken}` },
   });
   if (resp.status === 404) return { hash: '', generation: 0 };
@@ -132,7 +176,7 @@ async function fetchRootIndex(
   rootHash: string,
 ): Promise<IndexLine[]> {
   if (!rootHash) return [];
-  const resp = await fetch(BLOB_URL + rootHash, {
+  const resp = await fetchWithRetry(BLOB_URL + rootHash, {
     headers: {
       Authorization: `Bearer ${userToken}`,
       'rm-filename': 'root.docSchema',
@@ -178,7 +222,7 @@ async function fetchDocMetadata(
   entry: IndexLine,
 ): Promise<DocMetadata | null> {
   // 1. Get the doc's sub-index (schema v3 list of files: .metadata, .content, ...)
-  const subIndexResp = await fetch(BLOB_URL + entry.hash, {
+  const subIndexResp = await fetchWithRetry(BLOB_URL + entry.hash, {
     headers: { Authorization: `Bearer ${userToken}`, 'rm-filename': entry.id },
   });
   if (!subIndexResp.ok) return null;
@@ -197,7 +241,7 @@ async function fetchDocMetadata(
   if (!metaHash) return null;
 
   // 2. Fetch the metadata blob
-  const metaResp = await fetch(BLOB_URL + metaHash, {
+  const metaResp = await fetchWithRetry(BLOB_URL + metaHash, {
     headers: { Authorization: `Bearer ${userToken}`, 'rm-filename': `${entry.id}.metadata` },
   });
   if (!metaResp.ok) return null;
@@ -354,7 +398,7 @@ export async function uploadPdf(input: UploadInput, env: Env): Promise<UploadRes
       'text/plain; charset=UTF-8',
     );
 
-    const commit = await fetch(ROOT_PUT, {
+    const commit = await fetchWithRetry(ROOT_PUT, {
       method: 'PUT',
       headers: {
         Authorization: `Bearer ${userToken}`,
