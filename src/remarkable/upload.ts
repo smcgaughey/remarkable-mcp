@@ -15,6 +15,9 @@ export interface UploadInput {
 export interface UploadResult {
   documentId: string;
   sizeBytes: number;
+  resolvedParent: string; // empty string = root
+  folderPath: string;     // the normalized folder path actually used
+  fellBackToRoot: boolean;
 }
 
 interface RootMeta {
@@ -162,6 +165,73 @@ async function hashConcatenated(hexHashes: string[]): Promise<string> {
   return hex(await sha256(concat));
 }
 
+// ─── Folder resolution ──────────────────────────────────────────────────────
+
+interface DocMetadata {
+  visibleName: string;
+  type: string;
+  parent: string;
+}
+
+async function fetchDocMetadata(
+  userToken: string,
+  entry: IndexLine,
+): Promise<DocMetadata | null> {
+  // 1. Get the doc's sub-index (schema v3 list of files: .metadata, .content, ...)
+  const subIndexResp = await fetch(BLOB_URL + entry.hash, {
+    headers: { Authorization: `Bearer ${userToken}`, 'rm-filename': entry.id },
+  });
+  if (!subIndexResp.ok) return null;
+
+  const rows = (await subIndexResp.text()).split('\n').filter((l) => l.length > 0);
+  rows.shift(); // drop schema line
+
+  let metaHash: string | null = null;
+  for (const row of rows) {
+    const parts = row.split(':');
+    if (parts[2]?.endsWith('.metadata')) {
+      metaHash = parts[0];
+      break;
+    }
+  }
+  if (!metaHash) return null;
+
+  // 2. Fetch the metadata blob
+  const metaResp = await fetch(BLOB_URL + metaHash, {
+    headers: { Authorization: `Bearer ${userToken}`, 'rm-filename': `${entry.id}.metadata` },
+  });
+  if (!metaResp.ok) return null;
+
+  const j = (await metaResp.json()) as Record<string, unknown>;
+  return {
+    visibleName: (j.visibleName as string) ?? '',
+    type: (j.type as string) ?? '',
+    parent: (j.parent as string) ?? '',
+  };
+}
+
+// Folder resolution intentionally only reads from KV — never walks the tree
+// at request time. Cloudflare Workers Free-plan subrequest budget is too
+// tight for live resolution on non-trivial libraries. Populate the cache via
+// the `scripts/sync-folders.sh` bootstrap (reads rmapi's local tree cache and
+// writes `folder:/Inbox → <uuid>` entries via wrangler kv). Uploads to a
+// folder not in the cache fall back to root with a flag, so nothing ever
+// hard-errors on a user-facing path.
+async function resolveFolder(
+  path: string,
+  _userToken: string,
+  env: Env,
+): Promise<{ parentId: string; fellBack: boolean; normalized: string }> {
+  const clean = path.replace(/^\/+|\/+$/g, '');
+  if (!clean) return { parentId: '', fellBack: false, normalized: '/' };
+
+  const cached = await env.TOKEN_CACHE.get(`folder:/${clean}`);
+  if (cached !== null) {
+    return { parentId: cached, fellBack: false, normalized: `/${clean}` };
+  }
+  return { parentId: '', fellBack: true, normalized: `/${clean}` };
+}
+
 function buildMetadata(displayName: string, parent: string, nowMs: string): string {
   return JSON.stringify({
     visibleName: displayName,
@@ -218,7 +288,8 @@ export async function uploadPdf(input: UploadInput, env: Env): Promise<UploadRes
   const docId = uuidv4();
   const displayName = input.filename.replace(/\.pdf$/i, '');
   const pdfBytes = b64decode(input.contentBase64);
-  const parent = ''; // root; folder resolution is a v0.2 concern
+  const resolved = await resolveFolder(input.folder, userToken, env);
+  const parent = resolved.parentId;
 
   const encoder = new TextEncoder();
   const metadataBytes = encoder.encode(buildMetadata(displayName, parent, String(Date.now())));
@@ -298,7 +369,13 @@ export async function uploadPdf(input: UploadInput, env: Env): Promise<UploadRes
     });
 
     if (commit.ok) {
-      return { documentId: docId, sizeBytes: pdfBytes.length };
+      return {
+        documentId: docId,
+        sizeBytes: pdfBytes.length,
+        resolvedParent: parent,
+        folderPath: resolved.fellBack ? '/ (root)' : resolved.normalized,
+        fellBackToRoot: resolved.fellBack,
+      };
     }
     if (commit.status === 412) continue;
     throw new Error(`Root commit -> ${commit.status} ${await commit.text()}`);

@@ -53,5 +53,9 @@ export async function handleUploadPdf(
     env,
   );
 
-  return `Uploaded "${filename}" (${result.sizeBytes} bytes) to ${folder}. Document ID: ${result.documentId}`;
+  let msg = `Uploaded "${filename}" (${result.sizeBytes} bytes) to ${result.folderPath} on reMarkable. Document ID: ${result.documentId}`;
+  if (result.fellBackToRoot) {
+    msg += `\n\nNote: requested folder "${folder}" is not in the folder cache, so the file was placed at root. Run scripts/sync-folders.sh locally to pre-populate folder mappings.`;
+  }
+  return msg;
 }
